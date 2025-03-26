@@ -212,7 +212,21 @@ class EdgesConvLayer(nn.Module):
         # 残差连接
         x_0 = x_0 * alpha + x * (1-alpha)
         if self.use_norm:
-            x_0 = self.drop(self.norms[n_id](x_0))
+            gamma = torch.stack([norm.weight for norm in self.norms])  # [num_types, 16]
+            beta = torch.stack([norm.bias for norm in self.norms])      # [num_types, 16]
+            
+            # 手动计算LayerNorm
+            eps = self.norms[0].eps  # 假设所有LayerNorm的eps相同
+            mean = x_0.mean(dim=1, keepdim=True)
+            var = x_0.var(dim=1, keepdim=True, unbiased=False)
+            x_normed = (x_0 - mean) / torch.sqrt(var + eps)
+            
+            # 根据type_id选择对应的gamma和beta
+            selected_gamma = gamma[type_id]  # [N, 16]
+            selected_beta = beta[type_id]    # [N, 16]
+            
+            # 应用缩放、偏移和Dropout
+            x_0 = self.drop(x_normed * selected_gamma + selected_beta)
         else:
             x_0 = self.drop(x_0)
         
