@@ -217,7 +217,7 @@ class EdgesConvLayer(nn.Module):
         k_trans = torch.einsum('ehd,ehdk->ehk', feat_src, relation_att)
         att = (feat_dst * k_trans).sum(dim=-1) * relation_pri / self.sqrt_dk  #[E, H]
         att_softmax = torch_scatter.composite.scatter_softmax(att, dst, dim=0)  #[E, H]
-        v_trans = torch.einsum('ehd,ehdk->ehk', feat_dst, relation_msg)
+        v_trans = torch.einsum('ehd,ehdk->ehk', feat_src, relation_msg)
 
         weighted = att_softmax.unsqueeze(-1) * v_trans  # [E, H, D]
         weighted = weighted.view(weighted.size(0), -1)  # [E, Hidden]
