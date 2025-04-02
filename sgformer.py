@@ -154,96 +154,92 @@ class GraphConv(nn.Module):
 
 
 class EdgesConvLayer(nn.Module):
-    def __init__(self, in_channels, out_channels, num_relations, n_heads, dropout=0.2, use_norm=False):
+    def __init__(self, num_node_type, num_edge_type, in_channels, out_channels, n_heads, dropout=0.2, use_norm=False):
         super().__init__()
-        
+        self.num_node_type = num_node_type
+        self.num_edge_type = num_edge_type
         self.in_channels = in_channels
         self.out_channels = out_channels
-        self.num_relations = num_relations
         self.n_heads = n_heads
         self.d_k = out_channels // n_heads
         self.sqrt_dk = math.sqrt(self.d_k)
         
-        self.use_norm = use_norm
-
         self.k_linears = nn.ModuleList()
         self.q_linears = nn.ModuleList()
         self.v_linears = nn.ModuleList()
         self.a_linears = nn.ModuleList()
-        
-        for t in range(num_types):
-            self.k_linears.append(nn.Linear(in_dim, out_dim))
-            self.q_linears.append(nn.Linear(in_dim, out_dim))
-            self.v_linears.append(nn.Linear(in_dim, out_dim))
-            self.a_linears.append(nn.Linear(out_dim, out_dim))
+        self.norms = nn.ModuleList()
+        self.use_norm = use_norm
+        for _ in range(num_node_type):
+            self.k_linears.append(nn.Linear(in_channels, out_channels))
+            self.q_linears.append(nn.Linear(in_channels, out_channels))
+            self.v_linears.append(nn.Linear(in_channels, out_channels))
+            self.a_linears.append(nn.Linear(out_channels, out_channels))
             if use_norm:
                 self.norms.append(nn.LayerNorm(out_channels))
 
-        # 关系参数
-        self.relation_pri = nn.Parameter(torch.ones(num_relations, n_heads))
-        self.relation_att = nn.Parameter(torch.Tensor(num_relations, n_heads, self.d_k, self.d_k))
-        self.relation_msg = nn.Parameter(torch.Tensor(num_relations, n_heads, self.d_k, self.d_k))
-        self.skip = nn.Parameter(torch.ones(num_types))
+        self.relation_pri = nn.Parameter(torch.ones(num_edge_type, n_heads))
+        self.relation_att = nn.Parameter(torch.Tensor(num_edge_type, n_heads, self.d_k, self.d_k))
+        self.relation_msg = nn.Parameter(torch.Tensor(num_edge_type, n_heads, self.d_k, self.d_k))
+        self.skip = nn.Parameter(torch.ones(num_node_type))
         self.drop = nn.Dropout(dropout)
-        
-        # 初始化
-        nn.init.xavier_uniform_(self.relation_att)
-        nn.init.xavier_uniform_(self.relation_msg)
 
     def reset_parameters(self):
+        nn.init.xavier_uniform_(self.relation_att)
+        nn.init.xavier_uniform_(self.relation_msg)
         for conv in self.convs:
             conv.reset_parameters()
     
-    def forward(self, x, edge_index, edge_attr):
-        relation_att = self.relation_att[edge_attr]
-        relation_pri = self.relation_pri[edge_attr]
-        relation_msg = self.relation_msg[edge_attr]
+    def forward(self, x, type_id, edge_index, edge_attr):
+        relation_att = self.relation_att[edge_attr.view(-1)]  #[E, H]
+        relation_pri = self.relation_pri[edge_attr.view(-1)]  #[E, H, D]
+        relation_msg = self.relation_msg[edge_attr.view(-1)]  #[E, H, D]
 
         src, dst = edge_index[0, :], edge_index[1, :]
-        
         feat_src = torch.index_select(x, dim=0, index=src)
         feat_dst = torch.index_select(x, dim=0, index=dst)
-   
-        k_src = torch.zeros(feat_src.size(0), self.out_dim).to(x.device)
-        q_dst = torch.zeros(feat_dst.size(0), self.out_dim).to(x.device)
-        v_src = torch.zeros(feat_src.size(0), self.out_dim).to(x.device)
-        for t in range(len(self.k_linears)):  # 遍历所有类型
+
+        ##TODO
+        k_src = torch.zeros(feat_src.size(0), self.out_channels)
+        q_dst = torch.zeros(feat_dst.size(0), self.out_channels)
+        v_src = torch.zeros(feat_src.size(0), self.out_channels)
+        for t in range(len(self.num_node_type)):
             mask = (edge_attr == t)
             if mask.any():
-                k[mask] = self.k_linears[t](feat_src[mask])
-                q[mask] = self.q_linears[t](feat_dst[mask])
-                v[mask] = self.v_linears[t](feat_src[mask])
-        
-        # feat_src = feat_src.view(-1, self.n_heads, self.d_k)
-        # feat_dst = feat_dst.view(-1, self.n_heads, self.d_k)
+                k_src[mask] = self.k_linears[t](feat_src[mask])
+                q_dst[mask] = self.q_linears[t](feat_dst[mask])
+                v_src[mask] = self.v_linears[t](feat_src[mask])
 
         k_src = k_src.view(-1, self.n_heads, self.d_k)
         q_dst = q_dst.view(-1, self.n_heads, self.d_k)
         v_src = v_src.view(-1, self.n_heads, self.d_k)
         
-        k_trans = torch.einsum('ehd,hdk->ehk', feat_src, relation_att)
-        att = (feat_dst * k_trans).sum(dim=-1) * relation_pri / self.sqrt_dk
-        att_softmax = torch_scatter.composite.scatter_softmax(att, dst, dim=0)
-        v_trans = torch.einsum('ehd,hdk->ehk', feat_dst, relation_msg)
+        k_trans = torch.einsum('ehd,ehdk->ehk', feat_src, relation_att)
+        att = (feat_dst * k_trans).sum(dim=-1) * relation_pri / self.sqrt_dk  #[E, H]
+        att_softmax = torch_scatter.composite.scatter_softmax(att, dst, dim=0)  #[E, H]
+        v_trans = torch.einsum('ehd,ehdk->ehk', feat_dst, relation_msg)
+
         weighted = att_softmax.unsqueeze(-1) * v_trans  # [E, H, D]
-        weighted = weighted.view(x.size(0), -1)
+        weighted = weighted.view(weighted.size(0), -1)  # [E, Hidden]
 
-        x_0 = torch_scatter.scatter_add(weighted, dst, dim=0, out=x_0)
+        x_0 = torch.zeros_like(x)
+        x_0 = torch_scatter.scatter_mean(weighted, dst, dim=0, out=x_0)  # [N, Hidden]
 
-        # 最终处理和残差连接
-        # for ntype in G.ntypes:
-        alpha = torch.sigmoid(self.skip[type_id])
-        
-        for t in range(len(self.k_linears)):  # 遍历所有类型
+        skip = self.skip[type_id]
+        alpha = torch.sigmoid(skip).unsqueeze(-1)
+
+        ##TODO
+        for t in range(len(self.num_node_type)):  # 遍历所有类型
             mask = (edge_attr == t)
             if mask.any():
                 x_0[mask] = self.a_linears[t](x_0[mask])
-                
-        # 残差连接
+
+        # residual
         x_0 = x_0 * alpha + x * (1-alpha)
+
         if self.use_norm:
             gamma = torch.stack([norm.weight for norm in self.norms])  # [num_types, 16]
-            beta = torch.stack([norm.bias for norm in self.norms])      # [num_types, 16]
+            beta = torch.stack([norm.bias for norm in self.norms])  # [num_types, 16]
             
             # 手动计算LayerNorm
             eps = self.norms[0].eps  # 假设所有LayerNorm的eps相同
@@ -267,11 +263,13 @@ class EdgesConvLayer(nn.Module):
 class EdgesConv(nn.Module):
     def __init__(
             self,
+            num_node_type,
+            num_edge_type,
             in_channels,
             hidden_channels,
-            num_relations,
             num_layers,
             num_heads,
+            dropout,
             use_norm=True
         ):
         super().__init__()
@@ -281,10 +279,12 @@ class EdgesConv(nn.Module):
         for _ in range(num_layers):
             self.ecs.append(
                 EdgesConvLayer(
+                    num_node_type,
+                    num_edge_type,
                     in_channels,
                     hidden_channels,
-                    num_relations,
                     num_heads,
+                    dropout,
                     use_norm=use_norm,
                 )
             )
