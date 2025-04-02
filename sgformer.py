@@ -204,7 +204,7 @@ class EdgesConvLayer(nn.Module):
         q_dst = torch.zeros(feat_dst.size(0), self.out_channels)
         v_src = torch.zeros(feat_src.size(0), self.out_channels)
         for t in range(len(self.num_node_type)):
-            mask = (edge_attr == t)
+            mask = (edge_attr == t).view(-1)
             if mask.any():
                 k_src[mask] = self.k_linears[t](feat_src[mask])
                 q_dst[mask] = self.q_linears[t](feat_dst[mask])
@@ -230,7 +230,7 @@ class EdgesConvLayer(nn.Module):
 
         ##TODO
         for t in range(len(self.num_node_type)):  # 遍历所有类型
-            mask = (edge_attr == t)
+            mask = (edge_attr == t).view(-1)
             if mask.any():
                 x_0[mask] = self.a_linears[t](x_0[mask])
 
