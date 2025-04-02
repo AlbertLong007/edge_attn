@@ -165,8 +165,17 @@ class EdgesConvLayer(nn.Module):
         self.sqrt_dk = math.sqrt(self.d_k)
         
         self.use_norm = use_norm
+
+        self.k_linears = nn.ModuleList()
+        self.q_linears = nn.ModuleList()
+        self.v_linears = nn.ModuleList()
+        self.a_linears = nn.ModuleList()
         
         for t in range(num_types):
+            self.k_linears.append(nn.Linear(in_dim, out_dim))
+            self.q_linears.append(nn.Linear(in_dim, out_dim))
+            self.v_linears.append(nn.Linear(in_dim, out_dim))
+            self.a_linears.append(nn.Linear(out_dim, out_dim))
             if use_norm:
                 self.norms.append(nn.LayerNorm(out_channels))
 
@@ -191,10 +200,26 @@ class EdgesConvLayer(nn.Module):
         relation_msg = self.relation_msg[edge_attr]
 
         src, dst = edge_index[0, :], edge_index[1, :]
+        
         feat_src = torch.index_select(x, dim=0, index=src)
         feat_dst = torch.index_select(x, dim=0, index=dst)
-        feat_src = feat_src.view(-1, self.n_heads, self.d_k)
-        feat_dst = feat_dst.view(-1, self.n_heads, self.d_k)
+   
+        k_src = torch.zeros(feat_src.size(0), self.out_dim).to(x.device)
+        q_dst = torch.zeros(feat_dst.size(0), self.out_dim).to(x.device)
+        v_src = torch.zeros(feat_src.size(0), self.out_dim).to(x.device)
+        for t in range(len(self.k_linears)):  # 遍历所有类型
+            mask = (edge_attr == t)
+            if mask.any():
+                k[mask] = self.k_linears[t](feat_src[mask])
+                q[mask] = self.q_linears[t](feat_dst[mask])
+                v[mask] = self.v_linears[t](feat_src[mask])
+        
+        # feat_src = feat_src.view(-1, self.n_heads, self.d_k)
+        # feat_dst = feat_dst.view(-1, self.n_heads, self.d_k)
+
+        k_src = k_src.view(-1, self.n_heads, self.d_k)
+        q_dst = q_dst.view(-1, self.n_heads, self.d_k)
+        v_src = v_src.view(-1, self.n_heads, self.d_k)
         
         k_trans = torch.einsum('ehd,hdk->ehk', feat_src, relation_att)
         att = (feat_dst * k_trans).sum(dim=-1) * relation_pri / self.sqrt_dk
@@ -207,8 +232,13 @@ class EdgesConvLayer(nn.Module):
 
         # 最终处理和残差连接
         # for ntype in G.ntypes:
-        alpha = torch.sigmoid(self.skip[type_id])#并非必要？
+        alpha = torch.sigmoid(self.skip[type_id])
         
+        for t in range(len(self.k_linears)):  # 遍历所有类型
+            mask = (edge_attr == t)
+            if mask.any():
+                x_0[mask] = self.a_linears[t](x_0[mask])
+                
         # 残差连接
         x_0 = x_0 * alpha + x * (1-alpha)
         if self.use_norm:
