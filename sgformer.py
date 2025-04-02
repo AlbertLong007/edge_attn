@@ -200,9 +200,9 @@ class EdgesConvLayer(nn.Module):
         feat_dst = torch.index_select(x, dim=0, index=dst)
 
         ##TODO
-        k_src = torch.zeros(feat_src.size(0), self.out_channels)
-        q_dst = torch.zeros(feat_dst.size(0), self.out_channels)
-        v_src = torch.zeros(feat_src.size(0), self.out_channels)
+        k_src = torch.zeros(feat_src.size(0), self.out_channels).to(x.device)
+        q_dst = torch.zeros(feat_dst.size(0), self.out_channels).to(x.device)
+        v_src = torch.zeros(feat_src.size(0), self.out_channels).to(x.device)
         for t in range(len(self.num_node_type)):
             mask = (edge_attr == t).view(-1)
             if mask.any():
